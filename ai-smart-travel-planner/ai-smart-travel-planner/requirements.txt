@@ -1,0 +1,180 @@
+google-genai==2.8.0
+streamlit==1.58.0
+pillow==12.2.0
+python-dotenv==1.0.1
+import os
+import time
+from dotenv import load_dotenv
+import streamlit as st
+from google import genai
+from google.genai.errors import APIError
+
+# Load environment variables safely from your local .env file
+load_dotenv()
+
+# Pull from environment variables securely
+GOOGLE_API_KEY = os.getenv('YOUR_GOOGLE_API_KEY')
+
+# CLEAN CLIENT INITIALIZATION:
+# Let the modern SDK handle default network timeouts natively. Bypasses the 
+# 400 INVALID_ARGUMENT deadline restriction entirely.
+client = genai.Client(api_key=GOOGLE_API_KEY)
+
+# Initialize Session State variables for trip persistence
+if 'travel_profile' not in st.session_state:
+    st.session_state.travel_profile = {
+        "Starting Point": "west Bengal, India",
+        "destination": "Paris, France",
+        "duration": "5 Days",
+        "budget": "Moderate / Mid-Range",
+        "travelers": "2 Adults",
+        "interests": "History, Local Cuisine, Art Museums"
+    }
+
+if 'generated_itinerary' not in st.session_state:
+    st.session_state.generated_itinerary = None
+
+# Function to get Gemini Response with built-in retry-logic for Free Tiers
+def get_travel_response(input_prompt):
+    """
+    Sends travel instructions to models/gemini-2.5-flash.
+    Safely captures free-tier 429 and 503 exceptions to allow auto-retries.
+    """
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents=[input_prompt]
+        )
+        return response.text
+    
+    except APIError as e:
+        # Automated free-tier backoff logic for rate limits (429) AND temporary server overloads (503)
+        if e.code in [429, 503]:  
+            st.warning(f"Server reported error {e.code} (Busy/Rate Limit). Retrying automatically in 5 seconds...")
+            time.sleep(5)
+            return get_travel_response(input_prompt)
+        return f"Gemini API Error: {str(e)}"
+    except Exception as e:
+        # Catch and auto-retry read/connection timeouts smoothly in the UI
+        if "timed out" in str(e).lower() or "deadline" in str(e).lower():
+            st.warning("The connection encountered a temporary network delay. Retrying the request automatically...")
+            time.sleep(3)
+            return get_travel_response(input_prompt)
+        return f"Unexpected Error: {str(e)}"
+
+# App Layout Configuration
+st.set_page_config(page_title="Smart Travel Planner", layout="wide")
+st.header("✈️ AI Smart Travel Planner Agent")
+st.write("Transforming complex trip planning into a seamless, enjoyable process.")
+
+# Sidebar for Travel Preferences configuration
+with st.sidebar:
+    st.subheader("🎒 Trip Constraints & Preferences")
+    origin = st.text_input("Starting From (Home)", value=st.session_state.travel_profile["Starting Point"])
+    dest = st.text_input("Destination City/Country", value=st.session_state.travel_profile["destination"])
+    days = st.text_input("Trip Duration (e.g. 5 Days)", value=st.session_state.travel_profile["duration"])
+    budget = st.selectbox("Budget Tier", ["Budget Friendly", "Moderate / Mid-Range", "Luxury / Premium"], index=1)
+    party = st.text_input("Travelers (e.g., Solo, Couple, Family of 4)", value=st.session_state.travel_profile["travelers"])
+    hobbies = st.text_area("Interests / Activities (Comma separated)", value=st.session_state.travel_profile["interests"])
+
+    if st.button("Save Trip Parameters"):
+        st.session_state.travel_profile = {
+            "Starting Point": origin,
+            "destination": dest,
+            "duration": days,
+            "budget": budget,
+            "travelers": party,
+            "interests": hobbies
+        }
+        st.success("Travel profiles registered!")
+
+# Main Tab Interfaces
+tab1, tab2, tab3 = st.tabs(["🗺️ Smart Itinerary Builder", "🏨 Transport & Accommodation", "☀️ Weather & Local Advice"])
+
+with tab1:
+    st.subheader("Tailored Day-by-Day Itinerary Planner")
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        custom_requests = st.text_area(
+            "Any custom constraints? (e.g., 'No early morning activities', 'Must include a beach day')",
+            placeholder="Type extra requests here..."
+        )
+    with col2:
+        st.write("### Active Trip Data")
+        st.json(st.session_state.travel_profile)
+
+    if st.button("Generate Complete Smart Itinerary"):
+        with st.spinner("Our AI travel agent is computing routes and scheduling local attractions..."):
+            prompt = f"""
+            You are an expert Smart Travel Planner Agent. Build a highly optimized, seamless day-by-day travel itinerary based on this profile:
+            
+            Destination: {st.session_state.travel_profile['destination']}
+            Duration: {st.session_state.travel_profile['duration']}
+            Budget Tier: {st.session_state.travel_profile['budget']}
+            Group Configuration: {st.session_state.travel_profile['travelers']}
+            Core Interests: {st.session_state.travel_profile['interests']}
+            Special User Constraints: {custom_requests if custom_requests else 'None provided'}
+            
+            Generate:
+            1. A highly readable day-by-day chronological schedule (Morning, Afternoon, Evening) grouping nearby activities together to save travel time.
+            2. Estimated time-on-site for key attractions.
+            3. Smart routing tips (e.g., 'Best explored by foot', 'Take Metro Line 4').
+            
+            Format clearly using markdown headers, bold anchors, and clean dividers.
+            """
+            st.session_state.generated_itinerary = get_travel_response(prompt)
+
+    # Render and Download block outside the execution button track to isolate page-refresh crashes
+    if st.session_state.generated_itinerary:
+        st.subheader("🗺️ Your Personalized Strategic Travel Map Plan")
+        st.markdown(st.session_state.generated_itinerary)
+        
+        # Guard checking logic
+        if not st.session_state.generated_itinerary.startswith("Gemini API Error") and not st.session_state.generated_itinerary.startswith("Unexpected Error"):
+            st.download_button(
+                label="📥 Download Itinerary Text",
+                data=st.session_state.generated_itinerary,
+                file_name=f"{st.session_state.travel_profile['destination'].replace(' ', '_')}_itinerary.txt",
+                mime="text/plain"
+            )
+
+with tab2:
+    st.subheader("Recommended Logistics & Lodging Strategy")
+    st.write("Get structural recommendations for transit routing and localized booking coordinates.")
+    
+    if st.button("Analyze Transport & Accommodation Options"):
+        with st.spinner("Scanning logical logistics configurations..."):
+            logistics_prompt = f"""
+            Act as a travel logistics coordinator. Provide a structured advisory framework for a trip to {st.session_state.travel_profile['destination']}.
+            Budget profile is {st.session_state.travel_profile['budget']} for {st.session_state.travel_profile['travelers']}.
+            
+            Provide explicit, realistic advice on:
+            1. **Optimal Neighborhoods for Lodging**: List 2-3 specific neighborhoods aligned with their budget tier, explaining the pros/cons of each district.
+            2. **Transit Choices**: Break down the most efficient local transport infrastructure methods (e.g., rail cards, rideshare availability, bike rentals).
+            3. **Budget Projections**: Give a realistic structural ballpark estimate of daily costs for transportation and accommodation in this target market.
+            """
+            logistics_response = get_travel_response(logistics_prompt)
+            st.markdown(logistics_response)
+
+with tab3:
+    st.subheader("Live-Context Checks & Safety Advisory")
+    st.write("Gain expert insights on local customs, packing guidelines, and seasonal realities.")
+    
+    if st.button("Fetch Local Context Guides"):
+        with st.spinner("Reviewing local travel alerts and weather dynamics..."):
+            insight_prompt = f"""
+            Act as a local travel guide expert located in {st.session_state.travel_profile['destination']}. 
+            Based on a trip length of {st.session_state.travel_profile['duration']}, 
+            provide structural insights regarding:
+            
+            1  **Seasonal Realities & Weather Adaptations**: General climate behaviors to expect and essential specialized wardrobe suggestions.
+            2. **Cultural Norms & Etiquette**: Crucial local rules regarding tipping structures, dining manners, and respectful communication customs.
+            3. **Safety Checklist**: Standard neighborhood precautions, common local tourist traps to bypass, and emergency contact advice.
+            4. **Financial Logistics & Currency Management**: Outline the prevailing local currency requirements. Specify if the destination relies heavily on digital payments/contactless cards, or if carrying physical cash is mandatory for local vendors and street markets.
+            5. **Connectivity & Power Standards**: Detail the exact electrical plug socket types, voltages, and frequencies utilized. Provide specific strategic guidance on obtaining local connectivity (e.g., purchasing regional eSIMs vs. physical tourist SIM cards at arrival hubs).
+            6. **Language Basics & Essential Phrases**: Provide a short checklist of 5-6 phonetic phrases crucial for daily survival, navigation, and ordering food to bridge initial communication gaps with locals.
+            7. **Public Transit Etiquette & Navigation App Recommendations**: Identify the highest-rated mapping or transit apps locals use to commute, alongside critical behavioral rules (e.g., designated quiet zones on trains, escalator standing sides, or specific ticket validation mechanics).
+            """
+            insight_response = get_travel_response(insight_prompt)
+            st.markdown(insight_response)
